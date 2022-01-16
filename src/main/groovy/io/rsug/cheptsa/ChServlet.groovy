@@ -8,7 +8,9 @@ import org.apache.commons.compress.utils.IOUtils
 import org.osgi.framework.Bundle
 import org.osgi.framework.BundleContext
 import org.osgi.framework.FrameworkUtil
+import sun.net.www.MimeEntry
 
+import javax.mail.internet.MimeUtility
 import javax.servlet.http.HttpServletRequest
 import java.nio.ByteBuffer
 import java.nio.file.DirectoryStream
@@ -19,13 +21,13 @@ import java.nio.file.Paths
 
 class ChServlet {
     enum Action {
-        None, Version, Bundle, Download, Tar, Imports, Unknown,
+        None, Version, Bundle, Download, Tar, Unknown,
     }
 
     Exchange exchange = null
     CamelContext camelCtx = null
     BundleContext osgiCtx = null
-    Bundle felix = null
+    Bundle felix = null, com_sap_it_node_stack_profile = null
 
     Map<String, String> inHeaders = [:], queryParams = [:]
     String method, query = null, root = null, requestURI = null
@@ -49,6 +51,9 @@ class ChServlet {
             felix.loadClass("org.apache.felix.framework.cache.BundleArchive")
             felix.loadClass("org.apache.felix.framework.cache.JarRevision")
             felix.loadClass("org.apache.felix.framework.cache.JarContent")
+
+            com_sap_it_node_stack_profile = osgiCtx.bundles.find { it.symbolicName == "com.sap.it.node.stack.profile" }
+            assert com_sap_it_node_stack_profile
         }
     }
 
@@ -84,18 +89,16 @@ class ChServlet {
     }
 
     void doGET() {
-        new Exception().stackTrace
-
         outRC = 200
         outHeaders."Content-Type" = "text/html; charset=utf-8"
         switch (action) {
             case Action.None:
-                out << "<html><head><title>Просмотр</title></head><body>\n"
-                out << "<p><a href='$root/version'>Version</a></p>\n"
-                out << "<p><a href='$root/tar'>Tar</a></p>\n"
+                out << "<html><head><title>Чепца v${getBuildVersion()}</title></head><body>\n"
+                out << "<p><a href='$root/version'>Version</a> посмотреть версию и бандлы</p>\n"
+                out << "<p><a href='$root/tar'>Tar</a> скачать полный тар сипиая</p>\n"
+                out << "<hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>"
                 break
             case Action.Version:
-                out << "<html><head><title>Версия системы и компонент</title></head><body>\n"
                 version()
                 break
             case Action.Bundle:
@@ -136,37 +139,53 @@ class ChServlet {
     }
 
     private void version() {
-        out << "<pre>" << "Java version = ${System.getProperty("java.version")}\n"
-        out << "Groovy version = ${GroovySystem.version}\n"
+        out << "<html><head><title>Версия системы и компонент</title></head><body>\n"
+
+        out << "<pre>\n"
         if (!mock) {
+            out << "CPI version = ${com_sap_it_node_stack_profile.version}\n"
+            out << "Java version = ${System.getProperty("java.version")}\n"
+            out << "Groovy version = ${GroovySystem.version}\n"
             assert exchange
-            Bundle camelCore = osgiCtx.bundles.find{it.symbolicName=="org.apache.camel.camel-core"}
+            Bundle camelCore = osgiCtx.bundles.find { it.symbolicName == "org.apache.camel.camel-core" }
             if (camelCore) {
                 out << "Camel version = $camelCore.version\n"
             }
+            Bundle scriptAPI = osgiCtx.bundles.find { it.symbolicName == "com.sap.it.script.script.engine.api" }
+            out << "Script API version = ${scriptAPI.version}\n"
+
             out << "***************************************************************\n"
+            out.append("Camel context (идентификатор потока)=$camelCtx\n")
+            out.append("Аптайм потока: ${camelCtx.uptime}\n")
+            out << "</pre>\n"
 
-            out.append("\nCamel context=$camelCtx, остальная инфа:\n")
-            out.append("аптайм: ${camelCtx.uptime}, мемасики и подъёбки:\\todo \n")
-            out.append("OSGI context=$osgiCtx\n")
-
-            out << "<h2>Бандлы</h2>\n"
+            out << "<h2>Бандлы</h2><table><thead><th>ID, версия</th><th>Тип</th><th>Provide-Capability</th></thead><tbody>\n"
             long total = 0, qty = 0
             osgiCtx.bundles.each { Bundle b ->
+                out.append("\n<tr><td>")
                 out.append("<a href='$root/bundle?$b.symbolicName'>$b</a> $b.version")
-                if (b.bundleId!=0) {
+                long sz = 0
+                String type, cap = "система"
+                if (b.bundleId != 0) {
                     CpiBundle cpib = new CpiBundle(b)
-                    long sz = Files.size(cpib.file)
-                    total += sz
-                    out.append(" длина=$sz")
+                    sz = Files.size(cpib.file)
+                    type = cpib.kind
+                    cap = cpib.headers.ProvideCapability
+                } else {
+                    type = "Системный"
                 }
+                total += sz
                 qty++
-                out.append("\n")
+                out.append("</td><td>$type</td><td>$cap</td></tr>")
             }
+            out.append("\n</tbody></table>")
             out.append("<b>Всего $qty бандлов общим размером $total байт</b>\n")
         } else {
+            out << "Java version = ${System.getProperty("java.version")}\n"
+            out << "Groovy version = ${GroovySystem.version}\n"
             out.append("<a href='$root/bundle?test.bundle.com'>test.bundle.com</a>\n")
         }
+        out << "</pre>\n"
     }
 
     private void bundle() {
@@ -174,39 +193,45 @@ class ChServlet {
         out << "<html><head><title>$bundleName</title></head><body>\n"
         if (!mock) {
             assert exchange
-            Bundle b = osgiCtx.bundles.find {it.symbolicName == bundleName}
+            Bundle b = osgiCtx.bundles.find { it.symbolicName == bundleName }
 
-            if (b==null) {
+            if (b == null) {
                 out << "<b>ОШИБКА: OSGi-бандл $bundleName не может быть найден</b>\n"
                 outRC = 400
                 return
             }
 
-            if (b.bundleId==0) {
+            if (b.bundleId == 0) {
                 out << "<b>$bundleName - системный</b>\n"
                 out << """<pre>location=$b.location, version=$b.version</pre>\n"""
                 return
             }
             CpiBundle cb = new CpiBundle(b)
             String dlname = "${bundleName}_${b.version}.jar"
-            out << """<h1>$bundleName [$b.bundleId] $b.version</h1><pre>
-скачать <a href="$root/download?file=${cb.file}&name=$dlname">$dlname</a>
-------------------------------------------------------------------------
-${cb}
+            out << """<h1>$bundleName [$b.bundleId] $b.version</h1>
+скачать <a href="$root/download?file=${cb.file}&name=$dlname">$dlname</a><br/>
+<h2>Заголовки манифеста</h2><pre>
 """
+            cb.headers.each {k, v ->
+                out << "\n$k: $v"
+            }
+
+            out << "\n</pre>\n<h2>Состав бандла</h2><pre>\n"
             cb.jc.entries.each {
                 out << it << "\n"
             }
             out << "\n</pre>\n"
         } else {
-            out << "Mock mode\n"
+            out << "Mock mode - ничего не реализовано\n"
         }
     }
 
     void tar() {
         Map<String, Path> lst2 = [:]
         int total = 0
+        String filename
         if (mock) {
+            filename = "сипиай_проба.tar"
             Path p = Paths.get("C:/Temp")
             DirectoryStream<Path> lst = Files.newDirectoryStream(p)
             lst.each {
@@ -218,8 +243,9 @@ ${cb}
                 }
             }
         } else {
-            osgiCtx.bundles.each {Bundle b ->
-                if (b.bundleId!=0) {
+            filename = "сипиай_${com_sap_it_node_stack_profile.version}.tar"
+            osgiCtx.bundles.each { Bundle b ->
+                if (b.bundleId != 0) {
                     CpiBundle cb = new CpiBundle(b)
                     total += Files.size(cb.file)
                     total += 1024
@@ -230,7 +256,7 @@ ${cb}
         ByteBuffer bb = ByteBuffer.allocate(total)
         ByteBufferOutputStream bbos = new ByteBufferOutputStream(bb)
         TarArchiveOutputStream tas = new TarArchiveOutputStream(bbos, "utf-8")
-        lst2.each {name, path ->
+        lst2.each { name, path ->
             ArchiveEntry te = tas.createArchiveEntry(path, name)
             tas.putArchiveEntry(te)
             IOUtils.copy(Files.newInputStream(path), tas)
@@ -242,7 +268,7 @@ ${cb}
         outHeaders."Content-Type" = "application/x-tar"
         outHeaders."Content-Description" = "File download"
         outHeaders."Content-Transfer-Encoding" = "binary"
-        outHeaders."Content-Disposition" = "attachment; filename=cpi.tar"
+        outHeaders."Content-Disposition" = "attachment; filename=" + MimeUtility.encodeText(filename)
         outStream = new ByteArrayInputStream(bb.array(), 0, bb.position())
     }
 
@@ -250,6 +276,20 @@ ${cb}
         outRC = 200
         outHeaders."Content-Type" = "text/plain"
         out << "POST\n\n${inHeaders}\n\n$body"
+    }
+
+    String getBuildVersion() {
+        String ver
+        if (this.class.package)
+            ver = this.class.package.getImplementationVersion()
+        else {
+            // здесь /META-INF/MANIFEST.MF будет грувишный а не данного jar
+//            Properties prop = new Properties()
+//            prop.load(this.getClass().getResourceAsStream("/META-INF/MANIFEST.MF"))
+//            ver = prop.getProperty("Implementation-Version") ?: "UnknownVersion"
+            ver = ChServlet.getResourceAsStream("/version.txt").text
+        }
+        return ver
     }
 
     ChServlet clone() {
