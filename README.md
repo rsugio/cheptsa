@@ -29,7 +29,7 @@
 
 ### Успешно протестировано
 * Neo - 5.30.7 16янв2022
-* CF - 
+* CF - 6.20.12 17янв2022
 
 # Вопросы, предложения?
 iliya.kuznetsov@gmail.com или https://t.me/sapintegration
