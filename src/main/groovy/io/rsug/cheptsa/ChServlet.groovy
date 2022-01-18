@@ -2,13 +2,14 @@ package io.rsug.cheptsa
 
 import org.apache.camel.CamelContext
 import org.apache.camel.Exchange
+import org.apache.camel.spi.Registry
 import org.apache.commons.compress.archivers.ArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.utils.IOUtils
 import org.osgi.framework.Bundle
 import org.osgi.framework.BundleContext
 import org.osgi.framework.FrameworkUtil
-import sun.net.www.MimeEntry
+import org.osgi.framework.ServiceReference
 
 import javax.mail.internet.MimeUtility
 import javax.servlet.http.HttpServletRequest
@@ -18,10 +19,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
-
 class ChServlet {
     enum Action {
-        None, Version, Bundle, Download, Tar, Unknown,
+        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Unknown
     }
 
     Exchange exchange = null
@@ -48,10 +48,6 @@ class ChServlet {
             osgiCtx = FrameworkUtil.getBundle(exchange.getClass()).bundleContext
             felix = osgiCtx.getBundle(0)
             assert felix
-            felix.loadClass("org.apache.felix.framework.cache.BundleArchive")
-            felix.loadClass("org.apache.felix.framework.cache.JarRevision")
-            felix.loadClass("org.apache.felix.framework.cache.JarContent")
-
             com_sap_it_node_stack_profile = osgiCtx.bundles.find { it.symbolicName == "com.sap.it.node.stack.profile" }
             assert com_sap_it_node_stack_profile
         }
@@ -64,6 +60,7 @@ class ChServlet {
         query = req.queryString
         String[] s = query?.split("&")
         s.each {
+            it = URLDecoder.decode(it, "UTF-8")
             if (it.contains("=")) {
                 String[] t = it.split("=")
                 queryParams[t[0]] = t[1]
@@ -84,6 +81,10 @@ class ChServlet {
             action = Action.Download
         else if (requestURI == "$root/tar")
             action = Action.Tar
+        else if (requestURI == "$root/neo")
+            action = Action.TestBedNeo
+        else if (requestURI == "$root/cf")
+            action = Action.TestBedCF
         else
             action = Action.Unknown
     }
@@ -95,7 +96,12 @@ class ChServlet {
             case Action.None:
                 out << "<html><head><title>Чепца v${getBuildVersion()}</title></head><body>\n"
                 out << "<p><a href='$root/version'>Version</a> посмотреть версию и бандлы</p>\n"
-                out << "<p><a href='$root/tar'>Tar</a> скачать полный тар сипиая</p>\n"
+                out << "<p><a href='$root/tar'>Tar</a> скачать полный тар сипиая"
+                out << " или <a href='$root/tar?set=АПИ'>набор API для разработчика</a>"
+                out << " или <a href='$root/tar?set=адаптеры'>все адаптеры</a>"
+                out << " или <a href='$root/tar?set=толькоСтандарт'>только стандарт</a>"
+                out << "</p>\n"
+                out << "<p><a href='$root/neo'>Тест сервисов Neo</a> и <a href='$root/cf'>CF</a> для платформозависимого</p>\n"
                 out << "<hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>"
                 break
             case Action.Version:
@@ -127,6 +133,14 @@ class ChServlet {
             case Action.Tar:
                 tar()
                 break
+            case Action.TestBedCF:
+                out << "<html><head><title>Тест для CF</title></head><body><pre>\n"
+                out << new TestBedCF(this.exchange).log() << "</pre>"
+                break
+            case Action.TestBedNeo:
+                out << "<html><head><title>Тест для Neo</title></head><body><pre>\n"
+                out << new TestBedNeo(this.exchange).log() << "</pre>"
+                break
             case Action.Unknown:
                 out << "<html><head><title>Сервлет</title></head><body>\n"
                 out << "<p>Не предусмотрено пока, вернитесь <a href='$root'>назад</a></p>\n"
@@ -153,7 +167,32 @@ class ChServlet {
             }
             Bundle scriptAPI = osgiCtx.bundles.find { it.symbolicName == "com.sap.it.script.script.engine.api" }
             out << "Script API version = ${scriptAPI.version}\n"
+            CamelContext ctx = exchange.context
 
+            out << """CamelContext:
+ .getPropertyPrefixToken() = ${ctx.getPropertyPrefixToken()}
+ .getPropertySuffixToken() = ${ctx.getPropertySuffixToken()}
+ .getLanguageNames() = ${ctx.getLanguageNames()}
+ .getComponentNames() = ${ctx.getComponentNames()}
+ .getDefaultTracer() = ${ctx.getDefaultTracer()}
+ .getVersion() = ${ctx.getVersion()}
+ .getUuidGenerator() = ${ctx.getUuidGenerator()}
+ .getStatus() = ${ctx.getStatus()}
+ .getGlobalOptions() = ${ctx.getGlobalOptions()}
+ .getRegistry() = ${ctx.getRegistry()}
+
+"""
+/* .getInterceptStrategies() = ${ctx.getInterceptStrategies()}
+ .getDataFormats() = ${ctx.getDataFormats()}
+ .getTransformers() = ${ctx.getTransformers()}
+ .getTransformerRegistry() = ${ctx.getTransformerRegistry()}
+ .getValidators() = ${ctx.getValidators()}
+ .getDefaultFactoryFinder() = ${ctx.getDefaultFactoryFinder()}
+ .getProducerServicePool() = ${ctx.getProducerServicePool()}
+ .getNodeIdFactory() = ${ctx.getNodeIdFactory()}
+ .getManagementStrategy() = ${ctx.getManagementStrategy()}
+ .getInflightRepository() = ${ctx.getInflightRepository()}
+*/
             out << "***************************************************************\n"
             out.append("Camel context (идентификатор потока)=$camelCtx\n")
             out.append("Аптайм потока: ${camelCtx.uptime}\n")
@@ -161,13 +200,16 @@ class ChServlet {
 
             out << "<h2>Бандлы</h2><table><thead><th>ID, версия</th><th>Тип</th><th>Provide-Capability</th></thead><tbody>\n"
             long total = 0, qty = 0
+
             osgiCtx.bundles.each { Bundle b ->
                 out.append("\n<tr><td>")
                 out.append("<a href='$root/bundle?$b.symbolicName'>$b</a> $b.version")
                 long sz = 0
                 String type, cap = "система"
+
                 if (b.bundleId != 0) {
                     CpiBundle cpib = new CpiBundle(b)
+                    assert cpib.tRUE() // проверка класслоадера
                     sz = Files.size(cpib.file)
                     type = cpib.kind
                     cap = cpib.headers.ProvideCapability
@@ -180,6 +222,33 @@ class ChServlet {
             }
             out.append("\n</tbody></table>")
             out.append("<b>Всего $qty бандлов общим размером $total байт</b>\n")
+            out.append("<h3>Сервисы</h3><pre>")
+            ServiceReference[] sref = osgiCtx.getAllServiceReferences(null, null)
+            int cc = 0
+            Set<String> objectClassez = new HashSet<>()
+            sref.each {ServiceReference it ->
+                out << "\n[$cc] "
+                it.propertyKeys.each {String k ->
+                    out << "$k=${it.getProperty(k)},"
+                }
+                String[] classez = it.getProperty("objectClass")
+                classez.each {objectClassez.add(it)}
+                cc++
+            }
+            out << "\n</pre>"
+            out << "<h3>Уникальные классы публичных сервисов</h3>\n<ul>"
+            Registry registry = exchange.context.registry
+            objectClassez.each {
+                String s
+                try {
+                    def f = registry.lookupByName(it)
+                    s = f.toString()
+                } catch(Exception e) {
+                    s = e.message
+                }
+                out << "<li>$it == $s</li>\n"}
+            out << "</ul>\n"
+
         } else {
             out << "Java version = ${System.getProperty("java.version")}\n"
             out << "Groovy version = ${GroovySystem.version}\n"
@@ -210,9 +279,12 @@ class ChServlet {
             String dlname = "${bundleName}_${b.version}.jar"
             out << """<h1>$bundleName [$b.bundleId] $b.version</h1>
 скачать <a href="$root/download?file=${cb.file}&name=$dlname">$dlname</a><br/>
+
+АПИ=${cb.isAPI}, вид=${cb.kind}, файл=${cb.file}, частьСтандарта=${cb.partOfStandard} $cb
+
 <h2>Заголовки манифеста</h2><pre>
 """
-            cb.headers.each {k, v ->
+            cb.headers.each { k, v ->
                 out << "\n$k: $v"
             }
 
@@ -243,15 +315,22 @@ class ChServlet {
                 }
             }
         } else {
-            filename = "сипиай_${com_sap_it_node_stack_profile.version}.tar"
-            osgiCtx.bundles.each { Bundle b ->
-                if (b.bundleId != 0) {
-                    CpiBundle cb = new CpiBundle(b)
+            String set = queryParams.set ?: "полныйФарш"
+            assert set in ["полныйФарш", "АПИ", "адаптеры", "толькоСтандарт"]
+            filename = "сипиай_${com_sap_it_node_stack_profile.version}_${set}.tar"
+            List<CpiBundle> bundles = new CpiBundle().listOfBundles(osgiCtx)
+            //osgiCtx.bundles.findAll {it.bundleId!=0}.each {bundles.add(new CpiBundle(it))}
+
+            bundles.each { CpiBundle cb ->
+                boolean ad = cb.kind == BundleKind.Adapter && set == "адаптеры"
+                boolean api = set == "АПИ" && cb.isAPI
+                if (set == "полныйФарш" || ad || api) {
                     total += Files.size(cb.file)
-                    total += 1024
+                    total += 1024 // служебные атрибуты блока
                     lst2[cb.fileName] = cb.file
                 }
             }
+            total += 1024 // для пустого tar без единого блока
         }
         ByteBuffer bb = ByteBuffer.allocate(total)
         ByteBufferOutputStream bbos = new ByteBufferOutputStream(bb)

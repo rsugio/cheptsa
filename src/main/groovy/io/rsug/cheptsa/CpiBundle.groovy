@@ -2,7 +2,6 @@ package io.rsug.cheptsa
 
 import org.apache.felix.framework.cache.JarContent
 
-//import org.apache.felix.framework.cache.JarRevision
 import org.osgi.framework.Bundle
 import org.apache.felix.framework.cache.BundleArchive
 import org.osgi.framework.BundleContext
@@ -13,7 +12,12 @@ enum BundleKind {
     Unknown, OSGi, Adapter, IFLMAP, VM, ScriptsCollection, FlowStep
 }
 
-class CpiBundle {
+interface CpiBundleI {  // маркерный интерфейс без которого в рантайме CPI не пашет
+    boolean tRUE()
+    List<CpiBundle> listOfBundles(BundleContext ctx)
+}
+
+class CpiBundle implements CpiBundleI {
     Bundle b
     BundleArchive ba
     def jr //JarRevision
@@ -23,7 +27,9 @@ class CpiBundle {
     String fileName // для даунлоада
     Map<String, String> headers = [:]
     BundleKind kind = BundleKind.Unknown
+    boolean isAPI, partOfStandard
 
+    CpiBundle() {}
     CpiBundle(Bundle b) {
         this.b = b
         ba = b.getArchive() // на крайняк переписать через InvokeMethod
@@ -39,42 +45,47 @@ class CpiBundle {
         String[] s = (headers."Provide-Capability" ?: "-").split(";")
         headers.ProvideCapability = s[0].trim()
 
-        if (headers.ProvideCapability == "com.sap.it.capability.adapter")
+        partOfStandard = false
+        if (headers.ProvideCapability == "com.sap.it.capability.adapter") {
             kind = BundleKind.Adapter
-        else if (headers."ProvideCapability" == "com.sap.it.capability.flowstep")
+            partOfStandard = true // проверка стандартный ли адаптер или нет, не делаю
+        } else if (headers."ProvideCapability" == "com.sap.it.capability.flowstep") {
             kind = BundleKind.FlowStep
-        else if (headers."SAP-BundleType" == "IntegrationFlow")
+            partOfStandard = true
+        } else if (headers."SAP-BundleType" == "IntegrationFlow")
             kind = BundleKind.IFLMAP
         else if (headers."SAP-BundleType" == "ValueMapping")
             kind = BundleKind.VM
         else if (headers."SAP-BundleType" == "ScriptCollection")
             kind = BundleKind.ScriptsCollection
-        else
+        else {
             kind = BundleKind.OSGi
-
+            partOfStandard = true
+        }
 
         fileName = "${b.symbolicName}_${b.version}.jar"
+        isAPI = b.symbolicName in
+                ["com.sap.it.public.generic.api",         // публичное Generic API но оно только в CF
+                 "com.sap.it.public.adapter.api",         // публичное Adapter API но оно только в CF
+                 "com.sap.cloud.integration.script.apis", // публичное скриптовое но его нет в SCPI
+                 "com.sap.it.asdk.com.sap.it.api.asdk",   // непубличное АПИ для: датасторы, кийсторы, креды
+                 "com.sap.esb.application.services.datastore", // непубличное для датасторов с произвольным доступом
+                 // сюда можно дополнять список также интересных API
+                ]
+    }
+    boolean tRUE() {
+        return true
     }
 
-    /**
-     * не возвращает нулевой системный бандл
-     * @param osgiCtx
-     * @return
-     */
-    static List<CpiBundle> bundles(BundleContext osgiCtx) {
-        List rez = []
-        osgiCtx.bundles.each { Bundle b ->
-            if (b.bundleId != 0) {
-                CpiBundle cb = new CpiBundle(b)
-                rez.add(cb)
-            }
+    List<CpiBundle> listOfBundles(BundleContext ctx) {
+        List<CpiBundle> lst = []
+        ctx.bundles.each {
+            if (it.bundleId != 0) lst.add(new CpiBundle(it))
         }
-        return rez
+        return lst
     }
-
 
     String toString() {
-        "CpiBundle($b.symbolicName)"
+        return "CpiBundle($b.symbolicName)"
     }
-
 }

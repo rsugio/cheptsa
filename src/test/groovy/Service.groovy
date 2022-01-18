@@ -4,9 +4,11 @@ import org.eclipse.jetty.servlet.ServletContextHandler
 import org.eclipse.jetty.servlet.ServletHolder
 import org.junit.Test
 
+import javax.mail.internet.MimeUtility
 import javax.servlet.http.HttpServlet
 import javax.servlet.http.HttpServletRequest
 import javax.servlet.http.HttpServletResponse
+import java.nio.charset.StandardCharsets
 
 class TestServlet extends HttpServlet {
     ChServlet servlet
@@ -63,5 +65,10 @@ class Service {
 
         server.start()
         server.join()
+    }
+
+    @Test
+    void formats() {
+        println(URLDecoder.decode("%D0%90%D0%9F%D0%98", "UTF-8"))
     }
 }
