@@ -1,5 +1,16 @@
 package io.rsug.cheptsa
 
+import com.sap.core.config.runtime.TenantUtils
+import com.sap.it.nm.TenantQuery
+import com.sap.it.nm.node.NodeLocal
+import com.sap.it.nm.spi.node.NodeHabitat
+import com.sap.it.nm.spi.store.access.ArtifactAccess
+import com.sap.it.nm.spi.store.access.TaskAccess
+import com.sap.it.nm.types.deploy.Artifact
+import com.sap.it.nm.types.deploy.ArtifactDescriptor
+import com.sap.it.nm.types.deploy.ArtifactType
+import com.sap.it.op.component.check.ServiceComponentRuntimeAccess
+import com.sap.it.op.mpl.loglevel.DebugLogLevelConfigurationProvider
 import org.apache.camel.CamelContext
 import org.apache.camel.Exchange
 import org.apache.camel.spi.Registry
@@ -18,20 +29,25 @@ import java.nio.file.DirectoryStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.regex.Matcher
+import java.util.regex.Pattern
 
 class ChServlet {
     enum Action {
-        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Unknown
+        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Unknown
     }
 
     Exchange exchange = null
     CamelContext camelCtx = null
     BundleContext osgiCtx = null
     Bundle felix = null, com_sap_it_node_stack_profile = null
+    Registry registry
 
     Map<String, String> inHeaders = [:], queryParams = [:]
     String method, query = null, root = null, requestURI = null
-    Action action
+    Action action = Action.None
     boolean mock = false
 
     int outRC = 0
@@ -45,6 +61,7 @@ class ChServlet {
         this.exchange = exc
         if (!mock) {
             camelCtx = exchange.context
+            registry = camelCtx.registry
             osgiCtx = FrameworkUtil.getBundle(exchange.getClass()).bundleContext
             felix = osgiCtx.getBundle(0)
             assert felix
@@ -69,24 +86,11 @@ class ChServlet {
             }
         }
         method = req.method
-
         requestURI = req.requestURI
-        if (requestURI == root || requestURI == "$root/")
-            action = Action.None
-        else if (requestURI == "$root/version")
-            action = Action.Version
-        else if (requestURI == "$root/bundle")
-            action = Action.Bundle
-        else if (requestURI == "$root/download")
-            action = Action.Download
-        else if (requestURI == "$root/tar")
-            action = Action.Tar
-        else if (requestURI == "$root/neo")
-            action = Action.TestBedNeo
-        else if (requestURI == "$root/cf")
-            action = Action.TestBedCF
-        else
-            action = Action.Unknown
+        Matcher m = Pattern.compile("$root/?(.*)\$").matcher(req.requestURI)
+        if (m.matches() && m.group(1)) {
+            action = Action.values().find { it.name().toLowerCase() == m.group(1) } ?: Action.Unknown
+        }
     }
 
     void doGET() {
@@ -94,15 +98,22 @@ class ChServlet {
         outHeaders."Content-Type" = "text/html; charset=utf-8"
         switch (action) {
             case Action.None:
-                out << "<html><head><title>Чепца v${getBuildVersion()}</title></head><body>\n"
-                out << "<p><a href='$root/version'>Version</a> посмотреть версию и бандлы</p>\n"
-                out << "<p><a href='$root/tar'>Tar</a> скачать полный тар сипиая"
-                out << " или <a href='$root/tar?set=АПИ'>набор API для разработчика</a>"
-                out << " или <a href='$root/tar?set=адаптеры'>все адаптеры</a>"
-                out << " или <a href='$root/tar?set=толькоСтандарт'>только стандарт</a>"
-                out << "</p>\n"
-                out << "<p><a href='$root/neo'>Тест сервисов Neo</a> и <a href='$root/cf'>CF</a> для платформозависимого</p>\n"
-                out << "<hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>"
+                out << """<html><head><title>Чепца v${getBuildVersion()}</title></head><body>
+<p><a href='$root/version'>Version</a> посмотреть версию и бандлы</p>
+<p><a href='$root/tar'>Tar</a> скачать полный тар сипиая
+  или <a href='$root/tar?set=АПИ'>набор API для разработчика</a>
+  или <a href='$root/tar?set=адаптеры'>все адаптеры</a>
+  или <a href='$root/tar?set=толькоСтандарт'>только стандарт</a></p>
+
+<p><a href='$root/testbedneo'>Тест сервисов Neo</a> и <a href='$root/testbedcf'>CF</a> для платформозависимого</p>
+
+<p><a href='$root/inflight'>Запуск 1В595-1</a></p>
+<p>Журнал <a href='$root/murzilka'>Мурзилка</a></p>
+
+
+<hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>
+</body></html>
+"""
                 break
             case Action.Version:
                 version()
@@ -113,7 +124,7 @@ class ChServlet {
             case Action.Download:
                 if (!query) {
                     outRC = 404
-                    out << "<html><body>Не указан файл для скачивания!\n"
+                    out << "<html><body>Не указан файл для скачивания!</body></html>"
                 } else {
                     assert queryParams.file && queryParams.name
                     Path p = Paths.get(queryParams.file)
@@ -126,7 +137,7 @@ class ChServlet {
                         outRC = 200
                     } else {
                         outRC = 404
-                        out << "<html><body>Файл $p не найден!\n"
+                        out << "<html><body>Файл $p не найден!</body></html>"
                     }
                 }
                 break
@@ -136,26 +147,33 @@ class ChServlet {
             case Action.TestBedCF:
                 out << "<html><head><title>Тест для CF</title></head><body><pre>\n"
                 out << new TestBedCF(this.exchange).log() << "</pre>"
+                out << "\n\n<hr/>"
+                out << "\n</body></html>"
                 break
             case Action.TestBedNeo:
                 out << "<html><head><title>Тест для Neo</title></head><body><pre>\n"
                 out << new TestBedNeo(this.exchange).log() << "</pre>"
+                out << "\n\n<hr/>"
+                out << "\n</body></html>"
+                break
+            case Action.Inflight:
+                inflight()
+                break
+            case Action.Murzilka:
+                murzilka()
                 break
             case Action.Unknown:
-                out << "<html><head><title>Сервлет</title></head><body>\n"
-                out << "<p>Не предусмотрено пока, вернитесь <a href='$root'>назад</a></p>\n"
+                outRC = 404
+                out << """<html><head><title>Сервлет</title></head><body>
+<p>$requestURI не предусмотрено пока, вернитесь <a href='$root'>назад</a></p>
+<hr/></body></html>"""
                 break
-        }
-        if (!outStream) {
-            out << "\n\n<hr/>"
-            out << "\n</body></html>"
         }
     }
 
     private void version() {
-        out << "<html><head><title>Версия системы и компонент</title></head><body>\n"
-
-        out << "<pre>\n"
+        out << """<html><head><title>Версия системы и компонент</title></head><body>
+<pre>"""
         if (!mock) {
             out << "CPI version = ${com_sap_it_node_stack_profile.version}\n"
             out << "Java version = ${System.getProperty("java.version")}\n"
@@ -165,39 +183,23 @@ class ChServlet {
             if (camelCore) {
                 out << "Camel version = $camelCore.version\n"
             }
-            Bundle scriptAPI = osgiCtx.bundles.find { it.symbolicName == "com.sap.it.script.script.engine.api" }
-            out << "Script API version = ${scriptAPI.version}\n"
-            CamelContext ctx = exchange.context
-
             out << """CamelContext:
- .getPropertyPrefixToken() = ${ctx.getPropertyPrefixToken()}
- .getPropertySuffixToken() = ${ctx.getPropertySuffixToken()}
- .getLanguageNames() = ${ctx.getLanguageNames()}
- .getComponentNames() = ${ctx.getComponentNames()}
- .getDefaultTracer() = ${ctx.getDefaultTracer()}
- .getVersion() = ${ctx.getVersion()}
- .getUuidGenerator() = ${ctx.getUuidGenerator()}
- .getStatus() = ${ctx.getStatus()}
- .getGlobalOptions() = ${ctx.getGlobalOptions()}
- .getRegistry() = ${ctx.getRegistry()}
+ .getPropertyPrefixToken() = ${camelCtx.getPropertyPrefixToken()}
+ .getPropertySuffixToken() = ${camelCtx.getPropertySuffixToken()}
+ .getLanguageNames() = ${camelCtx.getLanguageNames()}
+ .getComponentNames() = ${camelCtx.getComponentNames()}
+ .getDefaultTracer() = ${camelCtx.getDefaultTracer()}
+ .getVersion() = ${camelCtx.getVersion()}
+ .getUuidGenerator() = ${camelCtx.getUuidGenerator()}
+ .getStatus() = ${camelCtx.getStatus()}
+ .getGlobalOptions() = ${camelCtx.getGlobalOptions()}
+ .getRegistry() = ${camelCtx.getRegistry()}
 
+***************************************************************
+Camel context (идентификатор потока)=$camelCtx
+Аптайм потока: ${camelCtx.uptime}
+</pre>
 """
-/* .getInterceptStrategies() = ${ctx.getInterceptStrategies()}
- .getDataFormats() = ${ctx.getDataFormats()}
- .getTransformers() = ${ctx.getTransformers()}
- .getTransformerRegistry() = ${ctx.getTransformerRegistry()}
- .getValidators() = ${ctx.getValidators()}
- .getDefaultFactoryFinder() = ${ctx.getDefaultFactoryFinder()}
- .getProducerServicePool() = ${ctx.getProducerServicePool()}
- .getNodeIdFactory() = ${ctx.getNodeIdFactory()}
- .getManagementStrategy() = ${ctx.getManagementStrategy()}
- .getInflightRepository() = ${ctx.getInflightRepository()}
-*/
-            out << "***************************************************************\n"
-            out.append("Camel context (идентификатор потока)=$camelCtx\n")
-            out.append("Аптайм потока: ${camelCtx.uptime}\n")
-            out << "</pre>\n"
-
             out << "<h2>Бандлы</h2><table><thead><th>ID, версия</th><th>Тип</th><th>Provide-Capability</th></thead><tbody>\n"
             long total = 0, qty = 0
 
@@ -224,37 +226,50 @@ class ChServlet {
             out.append("<b>Всего $qty бандлов общим размером $total байт</b>\n")
             out.append("<h3>Сервисы</h3><pre>")
             ServiceReference[] sref = osgiCtx.getAllServiceReferences(null, null)
-            int cc = 0
+            int c = 0
             Set<String> objectClassez = new HashSet<>()
-            sref.each {ServiceReference it ->
-                out << "\n[$cc] "
-                it.propertyKeys.each {String k ->
+            sref.each { ServiceReference it ->
+                out << "\n[$c] "
+                it.propertyKeys.each { String k ->
                     out << "$k=${it.getProperty(k)},"
                 }
                 String[] classez = it.getProperty("objectClass")
-                classez.each {objectClassez.add(it)}
-                cc++
+                classez.each { objectClassez.add(it) }
+                c++
             }
             out << "\n</pre>"
             out << "<h3>Уникальные классы публичных сервисов</h3>\n<ul>"
-            Registry registry = exchange.context.registry
             objectClassez.each {
                 String s
                 try {
                     def f = registry.lookupByName(it)
                     s = f.toString()
-                } catch(Exception e) {
+                } catch (Exception e) {
                     s = e.message
                 }
-                out << "<li>$it == $s</li>\n"}
+                out << "<li>$it == $s</li>\n"
+            }
             out << "</ul>\n"
-
+//            ComponentCommand cc = registry.lookupByName("com.sap.esb.monitoring.component.command.impl.ComponentCommand")
+//            IRuntimeDelegate ird = registry.lookupByName("com.sap.gateway.core.api.delegate.IRuntimeDelegate")
+//            MessageLogFactory mlf = registry.lookupByName("com.sap.it.api.msglog.MessageLogFactory")
+//            ListCommand lc = registry.lookupByName("com.sap.it.commons.cache.commands.ListCommand")
+//            ConfigurationReadService crs = registry.lookupByName("com.sap.it.commons.config.read.ConfigurationReadService")
+            ServiceComponentRuntimeAccess scra = registry.lookupByName("com.sap.it.op.component.check.ServiceComponentRuntimeAccess")
+            out << "<h3>ServiceComponentRuntimeAccess</h3><pre>\n"
+            scra.components.each { k, v ->
+                out << "$k: ${v.state}\n"
+            }
+            out << "</pre>\n"
+            DebugLogLevelConfigurationProvider dllcp = registry.lookupByName("com.sap.it.op.mpl.loglevel.DebugLogLevelConfigurationProvider")
         } else {
             out << "Java version = ${System.getProperty("java.version")}\n"
             out << "Groovy version = ${GroovySystem.version}\n"
             out.append("<a href='$root/bundle?test.bundle.com'>test.bundle.com</a>\n")
         }
         out << "</pre>\n"
+        out << "\n\n<hr/>"
+        out << "\n</body></html>"
     }
 
     private void bundle() {
@@ -293,6 +308,8 @@ class ChServlet {
                 out << it << "\n"
             }
             out << "\n</pre>\n"
+            out << "\n\n<hr/>"
+            out << "\n</body></html>"
         } else {
             out << "Mock mode - ничего не реализовано\n"
         }
@@ -351,6 +368,88 @@ class ChServlet {
         outStream = new ByteArrayInputStream(bb.array(), 0, bb.position())
     }
 
+    void inflight() {
+        // https://blogs.sap.com/2019/11/07/how-to-stop-messages-in-cpi-manually/
+        out << """<html><head><title>Бортовой самописец 1В595-1</title></head><body>
+<h1>Что там у нас в карманцах?</h1>
+<table border="1px"><thead><tr><td></td><td>MPL ID</td><td>Аптайм</td><td>Поток</td><td>ОТМЕНА</td></tr></thead>
+<tbody>"""
+        int cx = 1
+        camelCtx.inflightRepository.browse().each { ie ->
+            Date cct = ie.exchange.properties.CamelCreatedTimestamp
+            ZonedDateTime zdt = ZonedDateTime.ofInstant(cct.toInstant(), ZoneId.of("Europe/Moscow"))
+            out << """<tr><td>${cx++}</td><td>${ie.exchange.properties.SAP_MessageProcessingLogID}</td>
+<td>${zdt.toOffsetDateTime()}</td>
+<td>${ie.exchange.context.name}</td>
+<td><form action='$root/cancel?a' method='POST'><input type='submit' value='отставить'/></form></td>
+</tr>"""
+        }
+        out << "</tbody></table></body></html>"
+    }
+
+    void murzilka() {
+        NodeHabitat nh = registry.lookupByName("com.sap.it.nm.spi.node.NodeHabitat")
+        ArtifactAccess aa = registry.lookupByName("com.sap.it.nm.spi.store.access.ArtifactAccess")
+        TaskAccess ta = registry.lookupByName("com.sap.it.nm.spi.store.access.TaskAccess")
+        //com.sap.it.nm.core.store.entity.ds.ArtifactAccessComponent aac = aa
+        out << """<html><head><title>Полистать Мурзилку за 2384г</title></head><body>
+<h1>...</h1>
+<table><thead><tr>
+<td>ИД</td><td>Имя</td><td>Версия</td><td>Кто задеплоил</td><td>Пакет</td><td>Предыдущий ИД</td></tr></thead>
+<tbody>"""
+//        out << "XXXXXX="+aa.findDescriptorsById(["b4d36a25-1e31-40f9-921b-edaf8effa441"].toSet())
+
+        ArtifactType.values().each { at ->
+            out << "<tr><td colspan='4'>$at</td></tr>\n"
+            aa.findBy(nh.tenantId, at).each { ad, Artifact a ->
+                String packid = ad.tags.find { it.name == "artifact.package.id" }?.value
+                String previd = ad.tags.find { it.name == "previous.artifact.id" }?.value
+                out << """<tr>
+<td>${ad.id}</td>
+<td>${ad.symbolicName}</td>
+<td>${ad.version}</td>
+<td>${ad.deployedBy}</td>
+<td>${packid}</td>
+<td>${previd}</td>
+</tr>"""
+            }
+        }
+        out << "</tbody></table>"
+//        NodeLocal nodeLocal = registry.lookupByName("com.sap.it.nm.node.NodeLocal")
+//        TenantQuery tq = registry.lookupByName("com.sap.it.nm.TenantQuery") бессмысленный запрос
+        // tsa == com.sap.it.nm.core.store.entity.RestrictedTenantStoreAccessImpl
+        //TenantStoreAccess tsa = registry.lookupByName("com.sap.it.nm.spi.store.access.TenantStoreAccess")
+
+        out << """<pre>NodeHabitat:
+  .account = ${nh.account}
+  .application = ${nh.application}
+  .tenantId = ${nh.tenantId}
+  .tenantName = ${nh.tenantName}
+  .orchestratorUrl = ${nh.orchestratorUrl}
+  .globalHost = ${nh.globalHost}
+  .internalDomain = ${nh.internalDomain}
+  .platformRuntimeVersion = ${nh.platformRuntimeVersion}
+  .baseUri = ${nh.baseUri}
+  .dispatcherUri = ${nh.dispatcherUri}
+  .nodeId = ${nh.nodeId}
+  .landscapeType = ${nh.landscapeType}
+  .availabilityZone = ${nh.availabilityZone}
+LandscapeInfo  
+  .domain = ${nh.domain}
+  .name = ${nh.name}
+  .regionName = ${nh.regionName}
+  .landscapeInternal = ${nh.landscapeInternal}
+
+"""
+        // results non-catched exception
+//        com.sap.core.config.runtime.api.ConfigurationService cs = registry.lookupByName("com.sap.core.config.runtime.api.ConfigurationService")
+//        com.sap.core.config.runtime.ConfigurationServiceImpl csi = cs
+//        out << """ConfigurationService $csi
+//"""
+
+        out << "</pre></body></html>"
+    }
+
     void doPOST(String body) {
         outRC = 200
         outHeaders."Content-Type" = "text/plain"
@@ -374,5 +473,4 @@ class ChServlet {
     ChServlet clone() {
         return new ChServlet(root, exchange, mock)
     }
-
 }

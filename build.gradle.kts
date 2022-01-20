@@ -16,6 +16,8 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.21")
 
     implementation("org.osgi:org.osgi.core:4.3.1")                          // взято из CPI
+    compileOnly("org.osgi:org.osgi.service.event:1.4.1")
+
     implementation("org.apache.felix:org.apache.felix.framework:5.6.12")    // взято из CPI
     implementation("org.apache.felix:org.apache.felix.configadmin:1.9.20")  // взято из CPI
     implementation("org.apache.felix:org.apache.felix.scr:2.1.26")  // взято из CPI CF
