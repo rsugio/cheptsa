@@ -1,13 +1,10 @@
 package io.rsug.cheptsa
 
-import com.sap.core.config.runtime.TenantUtils
-import com.sap.it.nm.TenantQuery
-import com.sap.it.nm.node.NodeLocal
+
 import com.sap.it.nm.spi.node.NodeHabitat
 import com.sap.it.nm.spi.store.access.ArtifactAccess
 import com.sap.it.nm.spi.store.access.TaskAccess
 import com.sap.it.nm.types.deploy.Artifact
-import com.sap.it.nm.types.deploy.ArtifactDescriptor
 import com.sap.it.nm.types.deploy.ArtifactType
 import com.sap.it.op.component.check.ServiceComponentRuntimeAccess
 import com.sap.it.op.mpl.loglevel.DebugLogLevelConfigurationProvider
@@ -36,7 +33,7 @@ import java.util.regex.Pattern
 
 class ChServlet {
     enum Action {
-        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Unknown
+        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Cancel, TestForm, Unknown
     }
 
     Exchange exchange = null
@@ -162,6 +159,13 @@ class ChServlet {
             case Action.Murzilka:
                 murzilka()
                 break
+            case Action.TestForm:
+                testForm()
+                break
+            case Action.Cancel:
+                // выдать редирект 302 на inflight
+                inflight()
+                break
             case Action.Unknown:
                 outRC = 404
                 out << """<html><head><title>Сервлет</title></head><body>
@@ -267,9 +271,7 @@ Camel context (идентификатор потока)=$camelCtx
             out << "Groovy version = ${GroovySystem.version}\n"
             out.append("<a href='$root/bundle?test.bundle.com'>test.bundle.com</a>\n")
         }
-        out << "</pre>\n"
-        out << "\n\n<hr/>"
-        out << "\n</body></html>"
+        out << "</pre><hr/></body></html>"
     }
 
     private void bundle() {
@@ -378,13 +380,23 @@ Camel context (идентификатор потока)=$camelCtx
         camelCtx.inflightRepository.browse().each { ie ->
             Date cct = ie.exchange.properties.CamelCreatedTimestamp
             ZonedDateTime zdt = ZonedDateTime.ofInstant(cct.toInstant(), ZoneId.of("Europe/Moscow"))
-            out << """<tr><td>${cx++}</td><td>${ie.exchange.properties.SAP_MessageProcessingLogID}</td>
+            out << """<tr>
+<form action='$root/cancel' method='POST'>
+<td>${cx++}</td>
+<td><input type='hidden' name="SAP_MessageProcessingLogID" value="${ie.exchange.properties.SAP_MessageProcessingLogID}"/>${ie.exchange.properties.SAP_MessageProcessingLogID}</td>
 <td>${zdt.toOffsetDateTime()}</td>
 <td>${ie.exchange.context.name}</td>
-<td><form action='$root/cancel?a' method='POST'><input type='submit' value='отставить'/></form></td>
-</tr>"""
+"""
+            if (false && ie.exchange.properties.SAP_MessageProcessingLogID == exchange.properties.SAP_MessageProcessingLogID)
+                out << "<td></td>"
+            else
+                out << """<td>
+<input type='submit' value='отставить'/></form></td>
+"""
+            out << "</form></tr>"
         }
         out << "</tbody></table></body></html>"
+        if (false) exchange.setProperty(Exchange.ROUTE_STOP, Boolean.TRUE)
     }
 
     void murzilka() {
@@ -450,10 +462,37 @@ LandscapeInfo
         out << "</pre></body></html>"
     }
 
+    void testForm() {
+        out << """<html><body><form name='a' action='$root/testform' method='POST'><pre>
+Тестовая форма <input type='hidden' name='input1' value='A123&amp;456&gt;&lt;'>
+sddffgddgfgfgfg
+<input type='hidden' name='input2' value='222222222222'>
+<input type='submit' value='отставить'/>
+</pre></form></body></html>"""
+    }
+
+    void testForm(String body) {
+        out << "<html><pre>"
+        inHeaders.each { k, v -> out << "$k\t$v\n" }
+        out << "<hr/>$body</pre></html>"
+    }
+
     void doPOST(String body) {
         outRC = 200
-        outHeaders."Content-Type" = "text/plain"
-        out << "POST\n\n${inHeaders}\n\n$body"
+        outHeaders."Content-Type" = "text/html; charset=utf-8"
+        switch (action) {
+            case Action.Cancel:
+                out << "<html><pre>"
+                inHeaders.each { k, v -> out << "$k\t$v\n" }
+                out << "<hr/>$body</pre></html>"
+                break
+            case Action.TestForm:
+                testForm(body)
+                break
+            default:
+                outRC = 404
+                out << "<html>Неизвестная команда</html>"
+        }
     }
 
     String getBuildVersion() {

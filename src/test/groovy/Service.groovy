@@ -1,7 +1,12 @@
 import io.rsug.cheptsa.ChServlet
+import org.apache.camel.Exchange
+import org.apache.olingo.odata2.api.edm.provider.Schema
+import org.apache.olingo.odata2.core.edm.provider.EdmxProvider
 import org.eclipse.jetty.server.Server
 import org.eclipse.jetty.servlet.ServletContextHandler
 import org.eclipse.jetty.servlet.ServletHolder
+import org.eclipse.jetty.util.log.Log
+import org.eclipse.jetty.util.log.StdErrLog
 import org.junit.Test
 
 import javax.mail.internet.MimeUtility
@@ -9,6 +14,7 @@ import javax.servlet.http.HttpServlet
 import javax.servlet.http.HttpServletRequest
 import javax.servlet.http.HttpServletResponse
 import java.nio.charset.StandardCharsets
+import java.nio.file.Paths
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.regex.Matcher
@@ -26,11 +32,12 @@ class TestServlet extends HttpServlet {
                            HttpServletResponse response) throws IOException {
         ChServlet n2 = servlet.clone()
         n2.parse(request)
+        String text = request.inputStream?.text
         if (n2.method == "GET")
             n2.doGET()
-        else if (n2.method == "POST")
-            n2.doPOST(request.inputStream.text)
-        else {
+        else if (n2.method == "POST") {
+            n2.doPOST(text)
+        } else {
             response.setStatus(400)
             response.setContentType("text/plain")
             response.setCharacterEncoding("utf-8")
@@ -57,7 +64,6 @@ class Service {
     @Test
     void simpledimple() {
         String root = "/http/viewer"
-
         Server server = new Server(8090)
         server.setStopAtShutdown(true)
         ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS)
@@ -75,5 +81,23 @@ class Service {
         println(URLDecoder.decode("%D0%90%D0%9F%D0%98", "UTF-8"))
         ZonedDateTime zdt = ZonedDateTime.ofInstant(new Date().toInstant(), ZoneId.of("Europe/Moscow"))
         println(zdt.toOffsetDateTime())
+        String s = "input1=A123%26456%3E%3C&input2=222222222222"
+        def a = ["CamelHttpResponseCode":1]
+        println(a.remove("CamelHttpResponseCode1"))
+        a.clear()
+    }
+}
+
+class E {
+    @Test
+    void e() {
+        InputStream e = Paths.get("C:\\workspace\\task_odata_translator\\SF_Dev_Metadata.xml").newInputStream()
+        EdmxProvider p = new EdmxProvider()
+        p.parse(e, true)
+        p.schemas.each { Schema sh->
+            sh.entityTypes.each {et ->
+
+            }
+        }
     }
 }

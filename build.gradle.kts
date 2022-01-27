@@ -28,6 +28,8 @@ dependencies {
 
     testImplementation("junit", "junit", "4.12")
     testImplementation("org.eclipse.jetty:jetty-server:9.4+")
+    testImplementation("org.apache.olingo:olingo-odata2-api:+")
+    testImplementation("org.apache.olingo:olingo-odata2-core:+")
 }
 
 tasks.jar {
