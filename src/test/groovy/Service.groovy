@@ -71,7 +71,6 @@ class Service {
         ChServlet n = new ChServlet(root, null, true)
         context.addServlet(new ServletHolder(new TestServlet(n)), "$root/*")
         server.setHandler(context)
-
         server.start()
         server.join()
     }
@@ -80,24 +79,32 @@ class Service {
     void formats() {
         println(URLDecoder.decode("%D0%90%D0%9F%D0%98", "UTF-8"))
         ZonedDateTime zdt = ZonedDateTime.ofInstant(new Date().toInstant(), ZoneId.of("Europe/Moscow"))
-        println(zdt.toOffsetDateTime())
+        assert zdt.toOffsetDateTime()
         String s = "input1=A123%26456%3E%3C&input2=222222222222"
-        def a = ["CamelHttpResponseCode":1]
-        println(a.remove("CamelHttpResponseCode1"))
-        a.clear()
+        assert ChServlet.parseQuery(s) == ["input1": "A123&456><", "input2": "222222222222"]
+        String from, encoded
+        from = "а= пробел "
+        encoded = URLEncoder.encode(from, "UTF-8")
+        assert encoded == "%D0%B0%3D+%D0%BF%D1%80%D0%BE%D0%B1%D0%B5%D0%BB+"
+        assert ChServlet.parseQuery(encoded) == ["а": " пробел "]
+        ChServlet.getNodeId("ID-vsa9306905-1643290080486-126-2") == "vsa9306905"
+        println(ChServlet.parseQuery("SAP_MessageProcessingLogID=AGHz0I-yF-bSgcvTvwTGM7g-b6YH&bundleSymbolicName=NLMK__Receive_Reports"))
     }
-}
 
-class E {
     @Test
-    void e() {
+    void edmx() {
         InputStream e = Paths.get("C:\\workspace\\task_odata_translator\\SF_Dev_Metadata.xml").newInputStream()
         EdmxProvider p = new EdmxProvider()
         p.parse(e, true)
-        p.schemas.each { Schema sh->
-            sh.entityTypes.each {et ->
+        p.schemas.each { Schema sh ->
+            sh.entityTypes.each { et ->
 
             }
         }
+    }
+
+    @Test
+    void parseNodeId() {
+
     }
 }

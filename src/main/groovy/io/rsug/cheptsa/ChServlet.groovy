@@ -1,6 +1,5 @@
 package io.rsug.cheptsa
 
-
 import com.sap.it.nm.spi.node.NodeHabitat
 import com.sap.it.nm.spi.store.access.ArtifactAccess
 import com.sap.it.nm.spi.store.access.TaskAccess
@@ -10,6 +9,7 @@ import com.sap.it.op.component.check.ServiceComponentRuntimeAccess
 import com.sap.it.op.mpl.loglevel.DebugLogLevelConfigurationProvider
 import org.apache.camel.CamelContext
 import org.apache.camel.Exchange
+import org.apache.camel.spi.InflightRepository
 import org.apache.camel.spi.Registry
 import org.apache.commons.compress.archivers.ArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -36,6 +36,26 @@ class ChServlet {
         None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Cancel, TestForm, Unknown
     }
 
+    class IR {
+        Bundle bundle
+        CamelContext ctx
+        Exchange exchange
+        String SAP_MessageProcessingLogID
+        String nodeId, cpiNode
+        Date CamelCreatedTimestamp
+
+        IR(Bundle b, InflightRepository.InflightExchange iex) {
+            bundle = b
+            exchange = iex.exchange
+            ctx = exchange.context
+            SAP_MessageProcessingLogID = exchange.getProperty("SAP_MessageProcessingLogID")
+            nodeId = iex.nodeId
+            cpiNode = getNodeId(exchange.exchangeId)
+            CamelCreatedTimestamp = exchange.properties.CamelCreatedTimestamp as Date
+        }
+    }
+
+    String nodeId = null
     Exchange exchange = null
     CamelContext camelCtx = null
     BundleContext osgiCtx = null
@@ -56,6 +76,7 @@ class ChServlet {
         this.root = root
         this.mock = mock
         this.exchange = exc
+        this.nodeId = getNodeId(exc.exchangeId)
         if (!mock) {
             camelCtx = exchange.context
             registry = camelCtx.registry
@@ -67,21 +88,33 @@ class ChServlet {
         }
     }
 
+    static Pattern nodeIdFromExchangeId = Pattern.compile("ID-([^-]+)-([0-9]+)-([0-9]+)-([0-9]+)")
+
+    static String getNodeId(String s) {
+        Matcher m = nodeIdFromExchangeId.matcher(s)
+        if (m.matches()) return m.group(1) else throw new IllegalArgumentException("Given exchange/message id '$s' doesn't match Camel template")
+    }
+
+    static Map<String, String> parseQuery(String s) {
+        Map<String, String> rez = [:]
+        s?.split("&")?.each {
+            it = URLDecoder.decode(it, "UTF-8")
+            if (it.contains("=")) {
+                String[] t = it.split("=")
+                rez[t[0]] = t[1]
+            } else {
+                rez[it] = ""
+            }
+        }
+        return rez
+    }
+
     void parse(HttpServletRequest req) {
         req.headerNames.each {
             inHeaders[it] = req.getHeader(it)
         }
         query = req.queryString
-        String[] s = query?.split("&")
-        s.each {
-            it = URLDecoder.decode(it, "UTF-8")
-            if (it.contains("=")) {
-                String[] t = it.split("=")
-                queryParams[t[0]] = t[1]
-            } else {
-                queryParams[it] = ""
-            }
-        }
+        queryParams = parseQuery(query)
         method = req.method
         requestURI = req.requestURI
         Matcher m = Pattern.compile("$root/?(.*)\$").matcher(req.requestURI)
@@ -106,7 +139,6 @@ class ChServlet {
 
 <p><a href='$root/inflight'>Запуск 1В595-1</a></p>
 <p>Журнал <a href='$root/murzilka'>Мурзилка</a></p>
-
 
 <hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>
 </body></html>
@@ -234,8 +266,7 @@ Camel context (идентификатор потока)=$camelCtx
             Set<String> objectClassez = new HashSet<>()
             sref.each { ServiceReference it ->
                 out << "\n[$c] "
-                it.propertyKeys.each { String k ->
-                    out << "$k=${it.getProperty(k)},"
+                it.propertyKeys.each { String k -> out << "$k=${it.getProperty(k)},"
                 }
                 String[] classez = it.getProperty("objectClass")
                 classez.each { objectClassez.add(it) }
@@ -261,8 +292,7 @@ Camel context (идентификатор потока)=$camelCtx
 //            ConfigurationReadService crs = registry.lookupByName("com.sap.it.commons.config.read.ConfigurationReadService")
             ServiceComponentRuntimeAccess scra = registry.lookupByName("com.sap.it.op.component.check.ServiceComponentRuntimeAccess")
             out << "<h3>ServiceComponentRuntimeAccess</h3><pre>\n"
-            scra.components.each { k, v ->
-                out << "$k: ${v.state}\n"
+            scra.components.each { k, v -> out << "$k: ${v.state}\n"
             }
             out << "</pre>\n"
             DebugLogLevelConfigurationProvider dllcp = registry.lookupByName("com.sap.it.op.mpl.loglevel.DebugLogLevelConfigurationProvider")
@@ -301,8 +331,7 @@ Camel context (идентификатор потока)=$camelCtx
 
 <h2>Заголовки манифеста</h2><pre>
 """
-            cb.headers.each { k, v ->
-                out << "\n$k: $v"
+            cb.headers.each { k, v -> out << "\n$k: $v"
             }
 
             out << "\n</pre>\n<h2>Состав бандла</h2><pre>\n"
@@ -370,33 +399,48 @@ Camel context (идентификатор потока)=$camelCtx
         outStream = new ByteArrayInputStream(bb.array(), 0, bb.position())
     }
 
+    List<IR> getInProcessing() {
+        List<IR> inProcessing = []
+        ServiceReference[] srs = osgiCtx.getServiceReferences(CamelContext.class.getName(), null)
+        srs.each { sr ->
+            CamelContext c2 = (CamelContext) osgiCtx.getService(sr)
+            c2.inflightRepository.browse().each {
+                inProcessing.add(new IR(sr.bundle, it))
+            }
+        }
+        return inProcessing
+    }
+
     void inflight() {
         // https://blogs.sap.com/2019/11/07/how-to-stop-messages-in-cpi-manually/
-        out << """<html><head><title>Бортовой самописец 1В595-1</title></head><body>
-<h1>Что там у нас в карманцах?</h1>
-<table border="1px"><thead><tr><td></td><td>MPL ID</td><td>Аптайм</td><td>Поток</td><td>ОТМЕНА</td></tr></thead>
+        List<IR> inProcessing = getInProcessing()
+
+        out << """<html><head>
+<title>Бортовой самописец 1В595-1</title></head><body>
+<h1>Дежурная смена, отчёт от ${nodeId}</h1>
+<table border="1px"><thead><tr><td>#</td><td>Узел связи</td><td>MPL ID</td><td>В карауле с</td><td>Полк</td><td>Приказ</td><td>Застряло в</td></tr></thead>
 <tbody>"""
         int cx = 1
-        camelCtx.inflightRepository.browse().each { ie ->
-            Date cct = ie.exchange.properties.CamelCreatedTimestamp
+        inProcessing.each {
+            Date cct = it.CamelCreatedTimestamp
             ZonedDateTime zdt = ZonedDateTime.ofInstant(cct.toInstant(), ZoneId.of("Europe/Moscow"))
             out << """<tr>
-<form action='$root/cancel' method='POST'>
 <td>${cx++}</td>
-<td><input type='hidden' name="SAP_MessageProcessingLogID" value="${ie.exchange.properties.SAP_MessageProcessingLogID}"/>${ie.exchange.properties.SAP_MessageProcessingLogID}</td>
+<td>${it.cpiNode}</td>
+<td>${it.SAP_MessageProcessingLogID}</td>
 <td>${zdt.toOffsetDateTime()}</td>
-<td>${ie.exchange.context.name}</td>
+<td>${it.bundle.symbolicName}</td>
 """
-            if (false && ie.exchange.properties.SAP_MessageProcessingLogID == exchange.properties.SAP_MessageProcessingLogID)
-                out << "<td></td>"
-            else
-                out << """<td>
+            boolean own = it.exchange == exchange
+            if (own) out << "<td>не стрелять, свои</td>" else out << """<td>
+<form action='$root/cancel' method='POST'>
+<input type='hidden' name="SAP_MessageProcessingLogID" value="${it.SAP_MessageProcessingLogID}"/>
+<input type='hidden' name="bundleSymbolicName" value="${it.bundle.symbolicName}"/>
 <input type='submit' value='отставить'/></form></td>
 """
-            out << "</form></tr>"
+            out << "<td>${it.nodeId}</td></tr>"
         }
         out << "</tbody></table></body></html>"
-        if (false) exchange.setProperty(Exchange.ROUTE_STOP, Boolean.TRUE)
     }
 
     void murzilka() {
@@ -466,7 +510,7 @@ LandscapeInfo
         out << """<html><body><form name='a' action='$root/testform' method='POST'><pre>
 Тестовая форма <input type='hidden' name='input1' value='A123&amp;456&gt;&lt;'>
 sddffgddgfgfgfg
-<input type='hidden' name='input2' value='222222222222'>
+<input type='hidden' name='input2' value=' русские буквы и пробелЪ '>
 <input type='submit' value='отставить'/>
 </pre></form></body></html>"""
     }
@@ -480,11 +524,30 @@ sddffgddgfgfgfg
     void doPOST(String body) {
         outRC = 200
         outHeaders."Content-Type" = "text/html; charset=utf-8"
+        String ct = inHeaders.find { it.key.equalsIgnoreCase("content-type") }?.value
+        Map<String, String> form = [:]
+        if (ct == "application/x-www-form-urlencoded") {
+            form = parseQuery(body)
+        }
         switch (action) {
             case Action.Cancel:
-                out << "<html><pre>"
-                inHeaders.each { k, v -> out << "$k\t$v\n" }
-                out << "<hr/>$body</pre></html>"
+                boolean cancelled = false
+                String text
+                List<IR> inProcessing = getInProcessing()
+                def ie= inProcessing.find{it.SAP_MessageProcessingLogID==form.SAP_MessageProcessingLogID}
+                if (ie) {
+                    assert ie.exchange
+                    ie.exchange.setException(new InterruptedException("Galya, we have a cancellation!"))
+                    ie.exchange.setProperty(Exchange.ROUTE_STOP, Boolean.TRUE)
+                    text = "Приказ в отношении '${form.SAP_MessageProcessingLogID}' отправлен"
+                    cancelled = true
+                } else {
+                    text = "Нарушитель '${form.SAP_MessageProcessingLogID}' пока не найден"
+                }
+                out << """<html><pre>
+Предположительно успешно: $cancelled но может потребовать немного времени ожидания
+$text
+</pre></html>"""
                 break
             case Action.TestForm:
                 testForm(body)
@@ -497,9 +560,7 @@ sddffgddgfgfgfg
 
     String getBuildVersion() {
         String ver
-        if (this.class.package)
-            ver = this.class.package.getImplementationVersion()
-        else {
+        if (this.class.package) ver = this.class.package.getImplementationVersion() else {
             // здесь /META-INF/MANIFEST.MF будет грувишный а не данного jar
 //            Properties prop = new Properties()
 //            prop.load(this.getClass().getResourceAsStream("/META-INF/MANIFEST.MF"))
