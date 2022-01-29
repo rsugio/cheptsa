@@ -88,7 +88,7 @@ class ChServlet {
         }
     }
 
-    static Pattern nodeIdFromExchangeId = Pattern.compile("ID-([^-]+)-([0-9]+)-([0-9]+)-([0-9]+)")
+    static Pattern nodeIdFromExchangeId = Pattern.compile("^ID-(.+)-([0-9]+)-([0-9]+)-([0-9]+)\$")
 
     static String getNodeId(String s) {
         Matcher m = nodeIdFromExchangeId.matcher(s)
