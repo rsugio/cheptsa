@@ -1,5 +1,11 @@
 package io.rsug.cheptsa
 
+import com.sap.esb.datastore.Data
+import com.sap.esb.datastore.DataStore
+import com.sap.it.api.ITApiFactory
+import com.sap.it.api.securestore.SecureStoreService
+import com.sap.it.api.securestore.UserCredential
+import com.sap.it.nm.security.SecureStore
 import com.sap.it.nm.spi.node.NodeHabitat
 import com.sap.it.nm.spi.store.access.ArtifactAccess
 import com.sap.it.nm.spi.store.access.TaskAccess
@@ -21,11 +27,16 @@ import org.osgi.framework.ServiceReference
 
 import javax.mail.internet.MimeUtility
 import javax.servlet.http.HttpServletRequest
+import java.lang.reflect.Method
 import java.nio.ByteBuffer
 import java.nio.file.DirectoryStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.sql.Connection
+import java.sql.PreparedStatement
+import java.sql.ResultSet
+import java.sql.ResultSetMetaData
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.regex.Matcher
@@ -33,7 +44,10 @@ import java.util.regex.Pattern
 
 class ChServlet {
     enum Action {
-        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Cancel, TestForm, Unknown
+        None, Version, Bundle, Download, Tar, TestBedNeo, TestBedCF, Inflight, Murzilka, Cancel, TestForm
+        , DatastoreMassWrite, DatastoreView
+        , SQL, SecurityMaterialView
+        , Unknown
     }
 
     class IR {
@@ -76,9 +90,9 @@ class ChServlet {
         this.root = root
         this.mock = mock
         this.exchange = exc
-        this.nodeId = getNodeId(exc.exchangeId)
         if (!mock) {
             camelCtx = exchange.context
+            this.nodeId = getNodeId(exc.exchangeId)
             registry = camelCtx.registry
             osgiCtx = FrameworkUtil.getBundle(exchange.getClass()).bundleContext
             felix = osgiCtx.getBundle(0)
@@ -140,6 +154,11 @@ class ChServlet {
 <p><a href='$root/inflight'>Запуск 1В595-1</a></p>
 <p>Журнал <a href='$root/murzilka'>Мурзилка</a></p>
 
+<p>Тест записи <a href='$root/datastoremasswrite'>datastoreMassWrite</a> 
+и <a href='$root/datastoreview'>просмотр сторов</a></p>
+
+<p>Позапускать <a href='$root/sql'>SQL</a></p>
+
 <hr/>Привет завсегдатаям <a href='https://t.me/sapintegration'>@sapintegration</a>
 </body></html>
 """
@@ -195,8 +214,30 @@ class ChServlet {
                 testForm()
                 break
             case Action.Cancel:
-                // выдать редирект 302 на inflight
+                //TODO выдать редирект 302 на inflight
                 inflight()
+                break
+            case Action.DatastoreMassWrite:
+                datastoreMassWrite()
+                break
+            case Action.DatastoreView:
+                datastoreView()
+                break
+            case Action.SQL:
+                sql()
+                break
+            case Action.SecurityMaterialView:
+                String name = queryParams.name ?: "none"
+                SecureStoreService secureStoreService = ITApiFactory.getService(SecureStoreService.class, null)
+                UserCredential uc = secureStoreService.getUserCredential(name)
+                out << "<html><body><pre>\n"
+                out << "name given=$name\n"
+                out << "нашлось имя=${uc.username}\n"
+                out << "пароль=${uc.password}\n"
+                uc.credentialProperties.each {k, v ->
+                    out << "\tсвойство.$k=$v\n"
+                }
+                out << "\n</pre></body></html>"
                 break
             case Action.Unknown:
                 outRC = 404
@@ -515,6 +556,132 @@ sddffgddgfgfgfg
 </pre></form></body></html>"""
     }
 
+    void datastoreMassWrite() {
+        out << """<html><body><form name='a' action='$root/datastoremasswrite' method='POST'><pre>
+Массовая запись в датастор: 
+Название датастора: <input name='datastoreName' value='DS1'>
+Квалификатор: <input name='qualifier' value='null'>
+messageID: <input name='messageId' value='${exchange.properties.SAP_MessageProcessingLogID}'>
+Размер сообщения, KB: <input name='sizeKB' value='500'>
+Количество сообщений: <input name='qty' value='1000'>
+<input type='submit' value='запустить '/>
+</pre></form></body></html>"""
+    }
+
+    void datastoreMassWrite(Map<String, String> form) {
+        String datastoreName = form.datastoreName
+        String qualifier = form.qualifier == "null" ? null : form.qualifier
+        String messageId = form.messageId
+        Integer sizeKB = Integer.parseInt(form.sizeKB)
+        Integer qty = Integer.parseInt(form.qty)
+
+        byte[] array = new byte[sizeKB * 1024]
+        for (int i = 0; i < array.length; i++) {
+            array[i] = (byte) i
+        }
+        Map<String, Object> headers = ["headerName1": "me", "anotherHeader": false]
+
+        //DataStore dataStore = camelCtx.registry.findByTypeWithName(DataStore) as DataStore
+        DataStore dataStore = camelCtx.registry.lookupByName(DataStore.class.name) as DataStore
+        assert dataStore != null
+
+//        DataStoreImpl dsImpl = dataStore as DataStoreImpl
+        long alert = 1000 * 60 * 60
+        long expires = alert + 1000 * 60 * 60
+        boolean overwrite = true, encrypt = false
+        out << "<html><body><pre>\n"
+        try {
+            (1..qty).each {
+                String sid = "tmp_$it"
+                Data data = new Data(datastoreName, qualifier, sid, array, headers, messageId, 0)
+                out << "Data[$it]=$data\n"
+                dataStore.put(null, data, overwrite, encrypt, alert, expires)
+            }
+            out << "Success!"
+        } catch (Exception e) {
+            out << "Error: $e\n${e.stackTrace.join("\n  ")}\n"
+        }
+        out << """</pre></body></html>"""
+    }
+
+    void datastoreView() {
+        DataStore dataStore = camelCtx.registry.lookupByName(DataStore.class.name) as DataStore
+        assert dataStore != null
+        Class c1 = dataStore.class
+        Method getConnection = c1.getDeclaredMethod("getConnection")
+
+        out << """<html><body><pre>
+store = $dataStore
+c1 = $c1
+  methods = {c1.declaredMethods.join("\n  ")}
+"""
+        Connection connection
+        try {
+            getConnection.setAccessible(true)
+            connection = getConnection.invoke(dataStore) as Connection
+            out << "connection = $connection\n"
+        } catch (Exception e) {
+            out << "<pre>*** $e ${e.stackTrace.join("\n  ")}***</pre>\n"
+        }
+
+        def table = dataStore.getDataStoreTable()
+        Class c2 = table.class
+        out << """
+table = $table
+getTableName = ${table.getTableName()}
+c2 = $c2
+  methods = {c2.declaredMethods.join("\n  ")}
+</pre></body></html>"""
+    }
+
+    void sql(Map<String, String> form = [:]) {
+        DataStore dataStore = camelCtx.registry.lookupByName(DataStore.class.name) as DataStore
+        assert dataStore != null
+        Method getConnection = dataStore.class.getDeclaredMethod("getConnection")
+        Connection connection = null
+        try {
+            getConnection.setAccessible(true)
+            connection = getConnection.invoke(dataStore) as Connection
+        } catch (Exception e) {
+            out << "<pre>*** $e ${e.stackTrace.join("\n  ")}***</pre>\n"
+        }
+        form.sql = form.sql ?: "SELECT 1 as A"
+        out << """<html><body><form name='sql' action='$root/sql' method='POST'><pre>
+connection=$connection
+
+Выполнение SQL запросов: 
+<textarea name="sql" cols="120" rows="5">${form.sql}</textarea>
+<input type='submit' value='сделать селект'/>
+</pre></form>"""
+        if (form.sql && connection) {
+            PreparedStatement ps = connection.prepareStatement(form.sql)
+            try {
+                ResultSet rs = ps.executeQuery()
+                out << "<pre>\n"
+                long l = 0
+                ResultSetMetaData rsmd = rs.metaData
+                out << "#\t"
+                for (int c = 1; c <= rsmd.columnCount; c++) {
+                    out << rsmd.getColumnName(c) << "\t"
+                }
+                out << "\n-----------------------------------------\n"
+                while (rs.next()) {
+                    out << "${l++}\t"
+                    for (int c = 1; c <= rsmd.columnCount; c++) {
+                        out << rs.getObject(c) << "\t"
+                    }
+                    out << "\n"
+                }
+                rs.close()
+                out << "\n</pre>"
+            } catch (Exception e) {
+                out << """*** $e ${e.stackTrace.join("\n  ")} ***\n"""
+            }
+            ps.close()
+        }
+        out << """</body></html>"""
+    }
+
     void testForm(String body) {
         out << "<html><pre>"
         inHeaders.each { k, v -> out << "$k\t$v\n" }
@@ -534,7 +701,7 @@ sddffgddgfgfgfg
                 boolean cancelled = false
                 String text
                 List<IR> inProcessing = getInProcessing()
-                def ie= inProcessing.find{it.SAP_MessageProcessingLogID==form.SAP_MessageProcessingLogID}
+                def ie = inProcessing.find { it.SAP_MessageProcessingLogID == form.SAP_MessageProcessingLogID }
                 if (ie) {
                     assert ie.exchange
                     ie.exchange.setException(new InterruptedException("Galya, we have a cancellation!"))
@@ -548,6 +715,12 @@ sddffgddgfgfgfg
 Предположительно успешно: $cancelled но может потребовать немного времени ожидания
 $text
 </pre></html>"""
+                break
+            case Action.DatastoreMassWrite:
+                datastoreMassWrite(form)
+                break
+            case Action.SQL:
+                sql(form)
                 break
             case Action.TestForm:
                 testForm(body)

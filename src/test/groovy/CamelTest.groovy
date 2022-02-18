@@ -17,7 +17,6 @@ class CamelTest {
     void a() {
         CamelContext context = new DefaultCamelContext()
         context.start()
-
         context.addRoutes(new RouteBuilder() {
             void configure() {
                 from("direct:Process_27944")
@@ -28,17 +27,15 @@ class CamelTest {
         })
         ProducerTemplate pt = new DefaultProducerTemplate(context)
         pt.start()
-        ConsumerTemplate ct = context.createConsumerTemplate() as DefaultConsumerTemplate
-        ct.start()
         Route r = context.getRoute("Process_27944")
         StringBuilder log = new StringBuilder()
         log << """*********************
 CamelContext=$context
 ProducerTemplate=$pt
-ConsumerTemplate=$ct
 Route=$r
 """
-        Exchange src = r.endpoint.createExchange(ExchangePattern.InOut)
+        Exchange src = r.endpoint.createExchange(ExchangePattern.InOnly)
+        src.in.body
         (1..5).each {
             Exchange rez = src.copy()
             rez.setProperty("test", "$it" as String)
@@ -46,9 +43,14 @@ Route=$r
             pt.send(r.endpoint, rez)
             log << rez.in.getBody(String) << "\n"
         }
-        ct.stop()
         pt.stop()
         context.stop()
         println(log.toString())
+
+        DefaultMessageHistory d
+        RuntimeCamelException e
+
+        NamedNode nn
+
     }
 }
